@@ -1,303 +1,681 @@
-// Room booking — Slack reminders, confirmations and live schedule canvas.
-//
-//   bookingTick        every minute: DM bookers 10 min before, auto-release
-//                      unconfirmed bookings, keep the canvas "Right now" current
-//   slackInteractions  Slack interactivity endpoint for Confirm / Release buttons
-//   onBookingChange    refreshes the canvas whenever a booking is written
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Room 205 & 202 ‚Äî Booking</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-const { onSchedule } = require('firebase-functions/v2/scheduler');
-const { onRequest } = require('firebase-functions/v2/https');
-const { onValueWritten } = require('firebase-functions/v2/database');
-const { defineSecret, defineString } = require('firebase-functions/params');
-const logger = require('firebase-functions/logger');
-const admin = require('firebase-admin');
-const crypto = require('crypto');
-
-admin.initializeApp();
-const db = admin.database();
-
-const SLACK_BOT_TOKEN = defineSecret('SLACK_BOT_TOKEN');
-const SLACK_SIGNING_SECRET = defineSecret('SLACK_SIGNING_SECRET');
-const SLACK_CHANNEL_ID = defineString('SLACK_CHANNEL_ID');
-const TIME_ZONE = defineString('TIME_ZONE', { default: 'America/Los_Angeles' });
-const BOOKING_URL = defineString('BOOKING_URL', { default: '' });
-
-const ROOMS = ['205', '202'];
-const REMINDER_MIN = 10;       // DM the booker this many minutes before start
-const RELEASE_AFTER_MIN = 5;   // release if still unconfirmed this long after start
-const MIN = 60 * 1000;
-
-// ── Slack helpers ────────────────────────────────────────────────────────────
-
-async function slack(method, body) {
-  const form = new URLSearchParams();
-  for (const [k, v] of Object.entries(body)) {
-    if (v !== undefined) form.set(k, typeof v === 'string' ? v : JSON.stringify(v));
-  }
-  const res = await fetch(`https://slack.com/api/${method}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      Authorization: `Bearer ${SLACK_BOT_TOKEN.value()}`,
-    },
-    body: form,
-  });
-  const data = await res.json();
-  if (!data.ok) throw new Error(`${method}: ${data.error}`);
-  return data;
-}
-
-function verifySlack(req) {
-  const ts = req.get('x-slack-request-timestamp');
-  const sig = req.get('x-slack-signature');
-  if (!ts || !sig || Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
-  const mine = 'v0=' + crypto
-    .createHmac('sha256', SLACK_SIGNING_SECRET.value())
-    .update(`v0:${ts}:${req.rawBody.toString('utf8')}`)
-    .digest('hex');
-  return mine.length === sig.length && crypto.timingSafeEqual(Buffer.from(mine), Buffer.from(sig));
-}
-
-const mrkdwn = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const fmtTime = ms => new Intl.DateTimeFormat('en-US', { timeZone: TIME_ZONE.value(), hour: 'numeric', minute: '2-digit' }).format(ms);
-const fmtDay = ms => new Intl.DateTimeFormat('en-US', { timeZone: TIME_ZONE.value(), weekday: 'long', month: 'short', day: 'numeric' }).format(ms);
-const dayKey = ms => new Intl.DateTimeFormat('en-CA', { timeZone: TIME_ZONE.value(), year: 'numeric', month: '2-digit', day: '2-digit' }).format(ms);
-const span = b => `${fmtTime(b.startAt)} – ${fmtTime(b.endAt)}`;
-
-async function slackUserFor(b) {
-  if (!b.organizerEmail) return null;
-  try {
-    return (await slack('users.lookupByEmail', { email: b.organizerEmail })).user.id;
-  } catch (e) {
-    logger.warn(`No Slack user for ${b.organizerEmail}`, e.message);
-    return null;
-  }
-}
-
-// Update fields only if the booking still exists (a plain update() would
-// resurrect a deleted booking as a partial node).
-async function updateIfExists(id, fields) {
-  const r = await db.ref(`bookings/${id}`).transaction(cur => (cur === null ? null : { ...cur, ...fields }));
-  return r.snapshot.val();
-}
-
-async function updateReminderMessage(b, text) {
-  if (!b.reminderChannel || !b.reminderTs) return;
-  try {
-    await slack('chat.update', { channel: b.reminderChannel, ts: b.reminderTs, text, blocks: [] });
-  } catch (e) {
-    logger.warn('chat.update failed', e.message);
-  }
-}
-
-// ── Reminders & auto-release ─────────────────────────────────────────────────
-
-function reminderBlocks(id, b, mention) {
-  return [
-    {
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: `:alarm_clock: ${mention}*Room ${b.room}* starts in ${REMINDER_MIN} minutes\n` +
-          `*${mrkdwn(b.title)}* · ${span(b)}\n` +
-          `Please confirm you still need it. If not confirmed by ${fmtTime(b.startAt + RELEASE_AFTER_MIN * MIN)}, ` +
-          `the room will be released for others.`,
-      },
-    },
-    {
-      type: 'actions',
-      elements: [
-        { type: 'button', style: 'primary', text: { type: 'plain_text', text: 'Confirm' }, action_id: 'confirm_booking', value: id },
-        { type: 'button', style: 'danger', text: { type: 'plain_text', text: 'Release room' }, action_id: 'release_booking', value: id },
-      ],
-    },
-  ];
-}
-
-async function sendReminder(id, b) {
-  const userId = await slackUserFor(b);
-  const text = `Room ${b.room} starts in ${REMINDER_MIN} minutes — please confirm your booking`;
-  // Prefer a DM (always notifies). Fall back to the channel, naming the booker.
-  const channel = userId || SLACK_CHANNEL_ID.value();
-  const mention = userId ? '' : `*${mrkdwn(b.organizer || 'Someone')}*, `;
-  const msg = await slack('chat.postMessage', { channel, text, blocks: reminderBlocks(id, b, mention) });
-  await updateIfExists(id, { slackUserId: userId || null, reminderChannel: msg.channel, reminderTs: msg.ts });
-}
-
-async function handleBooking(id, b, now) {
-  if (b.status !== 'pending' || !b.startAt) return;
-
-  if (!b.reminderSentAt && b.startAt - now <= REMINDER_MIN * MIN && now < b.startAt + RELEASE_AFTER_MIN * MIN) {
-    // Claim the reminder atomically so overlapping ticks never double-send.
-    const r = await db.ref(`bookings/${id}`).transaction(cur => {
-      if (cur === null) return null;
-      if (cur.status !== 'pending' || cur.reminderSentAt) return;
-      return { ...cur, reminderSentAt: now };
-    });
-    if (!r.committed || r.snapshot.val()?.reminderSentAt !== now) return;
-    try {
-      await sendReminder(id, b);
-    } catch (e) {
-      // Un-claim so the next tick retries; never auto-release a booking whose owner wasn't reminded.
-      logger.error(`Reminder failed for ${id}`, e.message);
-      await updateIfExists(id, { reminderSentAt: null });
-    }
-    return;
-  }
-
-  if (b.reminderSentAt && now >= b.startAt + RELEASE_AFTER_MIN * MIN) {
-    const r = await db.ref(`bookings/${id}`).transaction(cur => {
-      if (cur === null) return null;
-      if (cur.status !== 'pending') return;   // confirmed in the meantime
-      return null;
-    });
-    if (!r.committed || r.snapshot.val() !== null) return;
-    await updateReminderMessage(b, `:unlock: Not confirmed in time — Room ${b.room} (${span(b)}) was released.`);
-    await slack('chat.postMessage', {
-      channel: SLACK_CHANNEL_ID.value(),
-      text: `:unlock: Room ${b.room} is free ${span(b)} — booking “${b.title}” by ${b.organizer || 'someone'} wasn't confirmed.`,
-    }).catch(e => logger.warn('Release notice failed', e.message));
-  }
-}
-
-exports.bookingTick = onSchedule(
-  { schedule: 'every 1 minutes', secrets: [SLACK_BOT_TOKEN] },
-  async () => {
-    const now = Date.now();
-    const snap = await db.ref('bookings').orderByChild('startAt')
-      .startAt(now - 2 * 60 * MIN).endAt(now + (REMINDER_MIN + 1) * MIN).get();
-    const jobs = [];
-    snap.forEach(child => { jobs.push(handleBooking(child.key, child.val(), now)); });
-    const results = await Promise.allSettled(jobs);
-    results.filter(r => r.status === 'rejected').forEach(r => logger.error(r.reason));
-
-    try { await refreshCanvas(); } catch (e) { logger.error('Canvas refresh failed', e.message); }
-  }
-);
-
-// ── Slack button clicks ──────────────────────────────────────────────────────
-
-exports.slackInteractions = onRequest(
-  { secrets: [SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET] },
-  async (req, res) => {
-    if (req.method !== 'POST' || !verifySlack(req)) { res.status(401).send('Invalid signature'); return; }
-
-    const payload = JSON.parse(req.body.payload || '{}');
-    const action = payload.actions?.[0];
-    if (!action) { res.sendStatus(200); return; }
-
-    const id = action.value;
-    const clicker = payload.user?.id;
-    const reply = body => fetch(payload.response_url, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-    });
-
-    const b = (await db.ref(`bookings/${id}`).get()).val();
-    if (!b) {
-      await reply({ replace_original: true, text: 'This booking no longer exists — it was cancelled or released.' });
-      res.sendStatus(200); return;
-    }
-    if (b.slackUserId && b.slackUserId !== clicker) {
-      await reply({ response_type: 'ephemeral', replace_original: false, text: `Only ${b.organizer} can respond to this booking.` });
-      res.sendStatus(200); return;
+    :root {
+      --bg: #ffffff;
+      --bg-secondary: #f5f5f4;
+      --text: #1a1a18;
+      --text-secondary: #5f5e5a;
+      --text-tertiary: #888780;
+      --border: rgba(0,0,0,0.12);
+      --border-secondary: rgba(0,0,0,0.22);
+      --radius-md: 8px;
+      --radius-lg: 12px;
+      --green: #1D9E75;
+      --green-dark: #0F6E56;
+      --green-bg: #E1F5EE;
+      --red: #E24B4A;
+      --red-bg: #FCEBEB;
+      --red-text: #791F1F;
+      --amber: #BA7517;
     }
 
-    if (action.action_id === 'confirm_booking') {
-      const after = await updateIfExists(id, { status: 'confirmed', confirmedAt: Date.now() });
-      await reply({
-        replace_original: true,
-        text: after
-          ? `:white_check_mark: Confirmed — Room ${b.room} is yours, ${span(b)} (“${b.title}”).`
-          : 'This booking no longer exists — it was cancelled or released.',
-      });
-    } else if (action.action_id === 'release_booking') {
-      await db.ref(`bookings/${id}`).remove();
-      await reply({ replace_original: true, text: `:unlock: Released Room ${b.room} (${span(b)}). Thanks for freeing it up!` });
-      await slack('chat.postMessage', {
-        channel: SLACK_CHANNEL_ID.value(),
-        text: `:unlock: Room ${b.room} just opened up ${span(b)} — ${b.organizer || 'the booker'} released it.`,
-      }).catch(e => logger.warn('Release notice failed', e.message));
-    }
-    res.sendStatus(200);
-  }
-);
-
-// ── Live schedule canvas (channel tab) ───────────────────────────────────────
-
-const clean = s => String(s ?? '').replace(/[*_~`#<>\[\]|!]/g, '').trim() || 'Untitled';
-
-function statusTag(b) {
-  if (b.status === 'confirmed') return ' ✅';
-  if (b.status === 'pending' && b.reminderSentAt) return ' ⏳ awaiting confirmation';
-  return '';
-}
-
-function buildCanvas(list, now) {
-  const today = dayKey(now);
-  const lines = ['# Room schedule', ''];
-  if (BOOKING_URL.value()) lines.push(`[Book a room](${BOOKING_URL.value()})`, '');
-
-  lines.push('## Right now');
-  for (const room of ROOMS) {
-    const upcoming = list.filter(b => b.room === room && b.endAt > now);
-    const cur = upcoming.find(b => b.startAt <= now);
-    const next = upcoming.find(b => b.startAt > now && dayKey(b.startAt) === today);
-    if (cur) {
-      lines.push(`- **Room ${room}** 🔴 In use — ${clean(cur.title)} · booked by ${clean(cur.organizer)} · until ${fmtTime(cur.endAt)}`);
-    } else {
-      lines.push(`- **Room ${room}** 🟢 Free ${next ? `until ${fmtTime(next.startAt)} (${clean(next.organizer)})` : 'for the rest of the day'}`);
-    }
-  }
-
-  const days = [...new Set(list.map(b => dayKey(b.startAt)))].filter(k => k > today).sort();
-  for (const k of [today, ...days]) {
-    const dayList = list.filter(b => dayKey(b.startAt) === k);
-    lines.push('', `## ${k === today ? `Today — ${fmtDay(now)}` : fmtDay(dayList[0].startAt)}`);
-    for (const room of ROOMS) {
-      const rb = dayList.filter(b => b.room === room);
-      lines.push(`### Room ${room}`);
-      if (!rb.length) lines.push('_No bookings_');
-      for (const b of rb) {
-        lines.push(`- ${span(b)} · **${clean(b.title)}** · ${clean(b.organizer)}${statusTag(b)}`);
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #1c1c1a;
+        --bg-secondary: #282825;
+        --text: #f0efe8;
+        --text-secondary: #b4b2a9;
+        --text-tertiary: #888780;
+        --border: rgba(255,255,255,0.12);
+        --border-secondary: rgba(255,255,255,0.22);
+        --green-bg: #04342c;
+        --red-bg: #501313;
+        --red-text: #F09595;
+        --amber: #EF9F27;
       }
     }
-  }
 
-  lines.push('', `_Times in ${TIME_ZONE.value()}. This tab updates automatically — edits here will be overwritten._`);
-  return lines.join('\n');
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg-secondary);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    .container { max-width: 760px; margin: 0 auto; }
+
+    /* Profile screen */
+    .name-screen {
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    }
+    .name-card {
+      background: var(--bg); border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg); padding: 2rem; width: 100%; max-width: 360px;
+    }
+    .name-card h2 { font-size: 18px; font-weight: 500; margin-bottom: 6px; }
+    .name-card p { font-size: 14px; color: var(--text-secondary); margin-bottom: 1.5rem; line-height: 1.5; }
+    .name-card label { font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px; }
+    .name-card input {
+      width: 100%; padding: 9px 12px; border-radius: var(--radius-md);
+      border: 0.5px solid var(--border-secondary); background: var(--bg);
+      color: var(--text); font-size: 15px; font-family: inherit; margin-bottom: 12px;
+    }
+    .name-card input:focus { outline: none; border-color: var(--green); box-shadow: 0 0 0 2px rgba(29,158,117,0.2); }
+    .name-card button {
+      width: 100%; padding: 10px; border-radius: var(--radius-md);
+      border: none; background: var(--green); color: white;
+      font-size: 14px; font-weight: 500; font-family: inherit; cursor: pointer;
+    }
+    .name-card button:hover { background: var(--green-dark); }
+    .name-card button.secondary {
+      background: transparent; color: var(--text-secondary); margin-top: 8px;
+    }
+    .name-card button.secondary:hover { background: var(--bg-secondary); }
+
+    /* Setup screen */
+    .setup-screen {
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    }
+    .setup-card {
+      background: var(--bg); border: 0.5px solid var(--border);
+      border-radius: var(--radius-lg); padding: 2rem; width: 100%; max-width: 480px;
+    }
+    .setup-card h2 { font-size: 18px; font-weight: 500; margin-bottom: 8px; }
+    .setup-card p { font-size: 14px; color: var(--text-secondary); margin-bottom: 1.5rem; line-height: 1.6; }
+    .setup-step { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+    .setup-step strong { color: var(--text); font-weight: 500; }
+
+    /* Main app */
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 1rem; flex-wrap: wrap; gap: 12px;
+    }
+    .app-title { font-size: 18px; font-weight: 500; }
+
+    .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .user-pill {
+      font-size: 12px; color: var(--text-secondary); background: var(--bg);
+      border: 0.5px solid var(--border); border-radius: 99px; padding: 4px 12px;
+      cursor: pointer;
+    }
+    .user-pill:hover { border-color: var(--border-secondary); }
+
+    .nav { display: flex; align-items: center; gap: 10px; }
+    .nav button {
+      border: 0.5px solid var(--border-secondary); background: var(--bg);
+      border-radius: var(--radius-md); padding: 6px 14px; cursor: pointer;
+      color: var(--text); font-size: 14px; font-family: inherit;
+    }
+    .nav button:hover { background: var(--bg-secondary); }
+    .week-label { font-size: 14px; font-weight: 500; min-width: 150px; text-align: center; }
+
+    /* Room switcher with live status */
+    .rooms { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 1rem; }
+    .room-tab {
+      background: var(--bg); border: 0.5px solid var(--border); border-radius: var(--radius-lg);
+      padding: 12px 14px; cursor: pointer; text-align: left; font-family: inherit; color: var(--text);
+      min-width: 0;
+    }
+    .room-tab:hover { border-color: var(--border-secondary); }
+    .room-tab.active { border-color: var(--green); box-shadow: 0 0 0 1px var(--green); }
+    .room-tab-top { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 500; }
+    .status-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+    .status-dot.busy { background: var(--red); }
+    .room-status {
+      font-size: 12px; color: var(--text-secondary); margin-top: 4px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+
+    .calendar {
+      border: 0.5px solid var(--border); border-radius: var(--radius-lg);
+      overflow: hidden; background: var(--bg);
+    }
+    .cal-head { display: grid; grid-template-columns: 56px repeat(5, 1fr); border-bottom: 0.5px solid var(--border); }
+    .cal-head-cell {
+      padding: 10px 8px; text-align: center; font-size: 12px;
+      color: var(--text-secondary); font-weight: 500; border-right: 0.5px solid var(--border);
+    }
+    .cal-head-cell:last-child { border-right: none; }
+    .cal-head-cell.today { color: var(--green); }
+    .cal-head-cell .dn { font-size: 20px; font-weight: 500; display: block; color: var(--text); }
+    .cal-head-cell.today .dn { color: var(--green); }
+
+    .cal-body { display: grid; grid-template-columns: 56px repeat(5, 1fr); }
+    .time-col { display: flex; flex-direction: column; }
+    .time-cell {
+      height: 44px; display: flex; align-items: flex-start; justify-content: flex-end;
+      padding: 4px 8px 0 0; font-size: 11px; color: var(--text-tertiary);
+      border-bottom: 0.5px solid var(--border); border-right: 0.5px solid var(--border);
+    }
+
+    .day-col { position: relative; border-right: 0.5px solid var(--border); min-width: 0; }
+    .day-col:last-child { border-right: none; }
+
+    .slot {
+      height: 44px; border-bottom: 0.5px solid var(--border);
+      cursor: pointer; position: relative; transition: background 0.1s;
+    }
+    .slot:hover { background: var(--bg-secondary); }
+    .slot.booked { cursor: default; }
+    .slot:not(.booked):hover::after {
+      content: "+"; position: absolute; right: 6px; top: 50%;
+      transform: translateY(-50%); font-size: 18px; color: var(--green); opacity: 0.6;
+    }
+
+    .booking {
+      position: absolute; left: 2px; right: 2px; border-radius: 6px;
+      padding: 4px 6px; z-index: 2; overflow: hidden; cursor: pointer;
+    }
+    .booking.awaiting { border-style: dashed !important; }
+    .booking.past { opacity: 0.55; }
+    .booking-title { font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .booking-meta { font-size: 10px; opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+    .now-line {
+      position: absolute; left: 0; right: 0; height: 2px; background: var(--red);
+      z-index: 3; pointer-events: none;
+    }
+    .now-line::before {
+      content: ""; position: absolute; left: -4px; top: -3px;
+      width: 8px; height: 8px; border-radius: 50%; background: var(--red);
+    }
+
+    .legend {
+      display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+      margin-top: 12px; font-size: 12px; color: var(--text-secondary);
+    }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 3px; background: var(--green-bg); border: 1px solid var(--green); }
+    .legend-dot.dashed { border-style: dashed; }
+
+    /* Modal */
+    .modal-bg {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+      z-index: 100; display: flex; align-items: center; justify-content: center; padding: 1rem;
+    }
+    .modal {
+      background: var(--bg); border-radius: var(--radius-lg);
+      border: 0.5px solid var(--border); padding: 1.5rem;
+      width: 100%; max-width: 340px;
+    }
+    .modal h3 { font-size: 16px; font-weight: 500; margin-bottom: 1.25rem; word-break: break-word; }
+    .field { margin-bottom: 12px; }
+    .field label { font-size: 12px; color: var(--text-secondary); display: block; margin-bottom: 4px; }
+    .field input, .field select {
+      width: 100%; padding: 8px 10px; border-radius: var(--radius-md);
+      border: 0.5px solid var(--border-secondary); background: var(--bg);
+      color: var(--text); font-size: 14px; font-family: inherit;
+    }
+    .field input:focus, .field select:focus {
+      outline: none; border-color: var(--green); box-shadow: 0 0 0 2px rgba(29,158,117,0.2);
+    }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .modal-actions { display: flex; gap: 8px; margin-top: 1.25rem; flex-wrap: wrap; }
+    .modal-actions button {
+      flex: 1; padding: 9px; border-radius: var(--radius-md);
+      border: 0.5px solid var(--border-secondary); cursor: pointer;
+      font-size: 13px; font-family: inherit; background: var(--bg); color: var(--text);
+    }
+    .modal-actions button:hover { background: var(--bg-secondary); }
+    .btn-confirm { background: var(--green) !important; border-color: var(--green) !important; color: white !important; font-weight: 500; }
+    .btn-confirm:hover { background: var(--green-dark) !important; }
+    .btn-delete { border-color: var(--red) !important; color: var(--red-text) !important; }
+    .btn-delete:hover { background: var(--red-bg) !important; }
+    .error { font-size: 12px; color: var(--red); margin-top: 6px; min-height: 16px; }
+    .own-badge {
+      font-size: 11px; background: var(--green-bg); color: var(--green-dark);
+      border-radius: 4px; padding: 2px 7px; display: inline-block; margin-bottom: 10px;
+    }
+    .detail { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
+    .detail span { color: var(--text); }
+    .detail .awaiting { color: var(--amber); }
+    .detail .confirmed { color: var(--green); }
+    .hint { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; line-height: 1.5; }
+
+    @media (max-width: 520px) {
+      body { padding: 1rem; }
+      .booking-meta { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Firebase SDKs -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-database-compat.js"></script>
+
+<div id="root"></div>
+
+<script>
+// ‚îÄ‚îÄ‚îÄ Firebase config ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyDpKr7x9dSQV4BQ33z8y6tFQTWxIz65aBo",
+  authDomain: "booking-86a47.firebaseapp.com",
+  databaseURL: "https://booking-86a47-default-rtdb.firebaseio.com",
+  projectId: "booking-86a47",
+  storageBucket: "booking-86a47.firebasestorage.app",
+  messagingSenderId: "521433950401",
+  appId: "1:521433950401:web:707b500336c153aa7d0c40"
+};
+// ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+
+const ROOMS = ['205', '202'];
+const REMINDER_MIN = 10;   // keep in sync with functions/index.js
+const SLOT_H = 44;
+
+const COLORS = [
+  { bg: '#E1F5EE', border: '#1D9E75', text: '#085041' },
+  { bg: '#E6F1FB', border: '#378ADD', text: '#0C447C' },
+  { bg: '#FAEEDA', border: '#EF9F27', text: '#633806' },
+  { bg: '#FBEAF0', border: '#D4537E', text: '#72243E' },
+  { bg: '#EEEDFE', border: '#7F77DD', text: '#26215C' },
+];
+
+// Slot start times; LABELS[i] is the boundary at the start of slot i (LABELS[20] = 18:00).
+const TIMES = [
+  '8:00','8:30','9:00','9:30','10:00','10:30','11:00','11:30',
+  '12:00','12:30','13:00','13:30','14:00','14:30','15:00','15:30',
+  '16:00','16:30','17:00','17:30'
+];
+const LABELS = [...TIMES, '18:00'];
+const DAYS = ['Mon','Tue','Wed','Thu','Fri'];
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+function load(k) { try { return localStorage.getItem(k); } catch { return null; } }
+function store(k, v) { try { v == null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} }
+
+let db = null;
+let bookings = {};
+let weekOffset = 0;
+let modal = null;
+let editingProfile = false;
+let room = ROOMS.includes(load('rb_room')) ? load('rb_room') : ROOMS[0];
+let profile = (() => {
+  try { const p = JSON.parse(load('rb_profile')); if (p) return p; } catch {}
+  return { name: load('room208_name') || '', email: '' };   // migrate old name-only profile
+})();
+
+function isConfigured() {
+  return FIREBASE_CONFIG.databaseURL && FIREBASE_CONFIG.databaseURL.length > 0;
 }
 
-async function refreshCanvas() {
+function initFirebase() {
+  firebase.initializeApp(FIREBASE_CONFIG);
+  db = firebase.database();
+  db.ref('bookings').on('value', snap => {
+    bookings = snap.val() || {};
+    renderMain();
+    if (modal?.type === 'view') renderModal();
+  });
+}
+
+// ‚îÄ‚îÄ Helpers ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function colorFor(name) {
+  let h = 0;
+  for (const ch of String(name || '').toLowerCase()) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return COLORS[h % COLORS.length];
+}
+
+function getWeekDates(offset) {
+  const now = new Date();
+  const dow = now.getDay();
+  const monday = new Date(now);
+  monday.setHours(0, 0, 0, 0);
+  monday.setDate(now.getDate() - (dow === 0 ? 6 : dow - 1) + offset * 7);
+  return Array.from({ length: 5 }, (_, i) => {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    return d;
+  });
+}
+
+function sameDay(a, b) {
+  a = new Date(a); b = new Date(b);
+  return a.getDate() === b.getDate() && a.getMonth() === b.getMonth() && a.getFullYear() === b.getFullYear();
+}
+function isToday(d) { return sameDay(d, Date.now()); }
+
+// Local date (not UTC) so the key doesn't shift for evening users west of UTC.
+function weekKey(dates) {
+  const d = dates[0];
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function slotTime(date, slot) {
+  const [h, m] = LABELS[slot].split(':').map(Number);
+  const d = new Date(date);
+  d.setHours(h, m, 0, 0);
+  return d.getTime();
+}
+
+function fmt(ms) { return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+function timeLabel(s, e) { return `${LABELS[s]} ‚Äì ${LABELS[e]}`; }
+
+function roomBookings(r) {
+  return Object.entries(bookings)
+    .filter(([, b]) => b.room === r)
+    .map(([id, b]) => ({ ...b, id }));
+}
+
+function isSlotBooked(list, day, slot) {
+  return list.some(b => b.day === day && slot >= b.startSlot && slot < b.endSlot);
+}
+
+function isOwn(b) {
+  if (b.organizerEmail && profile.email) return b.organizerEmail.toLowerCase() === profile.email.toLowerCase();
+  return !!b.organizer && b.organizer.toLowerCase() === profile.name.toLowerCase();
+}
+
+function isAwaiting(b) { return b.status === 'pending' && !!b.reminderSentAt; }
+
+// Who has the room right now, or when it's next taken today.
+function roomStatus(r, now) {
+  const upcoming = roomBookings(r)
+    .filter(b => b.startAt && b.endAt > now)
+    .sort((a, b) => a.startAt - b.startAt);
+  const cur = upcoming.find(b => b.startAt <= now);
+  if (cur) return { busy: true, text: `${cur.organizer || 'Someone'} ¬∑ ${cur.title} ¬∑ until ${fmt(cur.endAt)}` };
+  const next = upcoming.find(b => sameDay(b.startAt, now));
+  return { busy: false, text: next ? `Free until ${fmt(next.startAt)} (${next.organizer || 'booked'})` : 'Free for the rest of the day' };
+}
+
+// ‚îÄ‚îÄ Actions ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+
+function selectRoom(r) {
+  room = r;
+  store('rb_room', r);
+  renderMain();
+}
+
+function openNew(day, slot) {
+  modal = { type: 'new', day, startSlot: slot, endSlot: Math.min(slot + 2, TIMES.length) };
+  renderModal();
+}
+
+function openView(id) {
+  modal = { type: 'view', id };
+  renderModal();
+}
+
+function closeModal() { modal = null; renderModal(); }
+
+function confirmBooking() {
+  const title = document.getElementById('m-title').value.trim();
+  const startSlot = parseInt(document.getElementById('m-start').value);
+  const endSlot = parseInt(document.getElementById('m-end').value);
+  const errEl = document.getElementById('m-err');
+  errEl.textContent = '';
+
+  if (!title) { errEl.textContent = 'Please enter a title.'; return; }
+  if (endSlot <= startSlot) { errEl.textContent = 'End time must be after start time.'; return; }
+
+  const dates = getWeekDates(weekOffset);
+  const wk = weekKey(dates);
+  const startAt = slotTime(dates[modal.day], startSlot);
+  const endAt = slotTime(dates[modal.day], endSlot);
   const now = Date.now();
-  const snap = await db.ref('bookings').orderByChild('startAt')
-    .startAt(now - 24 * 60 * MIN).endAt(now + 7 * 24 * 60 * MIN).get();
-  const list = [];
-  snap.forEach(c => { const b = c.val(); if (ROOMS.includes(b.room) && b.endAt) list.push(b); });
-  list.sort((a, b) => a.startAt - b.startAt);
-  const today = dayKey(now);
-  const markdown = buildCanvas(list.filter(b => dayKey(b.startAt) >= today), now);
 
-  const hash = crypto.createHash('sha1').update(markdown).digest('hex');
-  const state = (await db.ref('slack').get()).val() || {};
-  if (state.canvasId && state.canvasHash === hash) return;   // nothing changed
+  if (endAt <= now) { errEl.textContent = 'That time has already passed.'; return; }
 
-  const document_content = { type: 'markdown', markdown };
-  if (state.canvasId) {
-    await slack('canvases.edit', { canvas_id: state.canvasId, changes: [{ operation: 'replace', document_content }] });
-  } else {
-    // Creates a new canvas tabbed in the channel (doesn't touch an existing channel canvas).
-    const channel = SLACK_CHANNEL_ID.value();
-    const r = await slack('canvases.create', { title: 'Room schedule', document_content, channel_id: channel });
-    await slack('canvases.access.set', { canvas_id: r.canvas_id, access_level: 'read', channel_ids: [channel] })
-      .catch(e => logger.warn('canvases.access.set failed', e.message));
-    await db.ref('slack/canvasId').set(r.canvas_id);
-  }
-  await db.ref('slack/canvasHash').set(hash);
+  const conflict = Object.values(bookings).some(b =>
+    b.room === room && b.week === wk && b.day === modal.day &&
+    startSlot < b.endSlot && endSlot > b.startSlot
+  );
+  if (conflict) { errEl.textContent = 'That time overlaps an existing booking.'; return; }
+
+  db.ref('bookings').push({
+    room, week: wk, day: modal.day, startSlot, endSlot, startAt, endAt, title,
+    organizer: profile.name,
+    organizerEmail: profile.email,
+    // Bookings starting within the reminder window are confirmed by the act of booking.
+    status: startAt - now <= REMINDER_MIN * 60000 ? 'confirmed' : 'pending',
+    createdAt: firebase.database.ServerValue.TIMESTAMP,
+  }).catch(e => alert('Could not save booking: ' + e.message));
+  closeModal();
 }
 
-exports.onBookingChange = onValueWritten(
-  { ref: '/bookings/{id}', secrets: [SLACK_BOT_TOKEN] },
-  async () => {
-    try { await refreshCanvas(); } catch (e) { logger.error('Canvas refresh failed', e.message); }
+function confirmFromWeb(id) {
+  db.ref('bookings/' + id).transaction(cur =>
+    cur ? { ...cur, status: 'confirmed', confirmedAt: Date.now() } : cur
+  );
+}
+
+function deleteBooking(id) {
+  db.ref('bookings/' + id).remove();
+  closeModal();
+}
+
+function saveProfile() {
+  const name = document.getElementById('name-input').value.trim();
+  const email = document.getElementById('email-input').value.trim().toLowerCase();
+  const errEl = document.getElementById('p-err');
+  if (!name) { errEl.textContent = 'Please enter your name.'; return; }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { errEl.textContent = 'Enter the email you use for Slack.'; return; }
+  profile = { name, email };
+  store('rb_profile', JSON.stringify(profile));
+  store('room208_name', null);
+  editingProfile = false;
+  renderApp();
+}
+
+function editProfile() { editingProfile = true; renderApp(); }
+function cancelProfile() { editingProfile = false; renderApp(); }
+
+// ‚îÄ‚îÄ Screens ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+
+function renderSetupScreen() {
+  document.getElementById('root').innerHTML = `
+  <div class="setup-screen">
+    <div class="setup-card">
+      <h2>Connect Firebase</h2>
+      <p>This app needs a free Firebase Realtime Database so everyone sees live bookings.</p>
+      <p class="setup-step"><strong>1.</strong> Create a project at <a href="https://console.firebase.google.com" target="_blank" style="color:var(--green)">console.firebase.google.com</a>.</p>
+      <p class="setup-step"><strong>2.</strong> Build ‚Üí Realtime Database ‚Üí Create database.</p>
+      <p class="setup-step"><strong>3.</strong> Project Settings ‚Üí Your apps ‚Üí Web ‚Üí copy the config into <code>FIREBASE_CONFIG</code> in index.html.</p>
+    </div>
+  </div>`;
+}
+
+function renderProfileScreen() {
+  const canCancel = editingProfile && profile.name && profile.email;
+  document.getElementById('root').innerHTML = `
+  <div class="name-screen">
+    <div class="name-card">
+      <h2>Welcome to room booking</h2>
+      <p>Your name shows on your bookings. Your Slack email is used to send you a reminder ${REMINDER_MIN} minutes before each meeting so you can confirm it.</p>
+      <label for="name-input">Name</label>
+      <input id="name-input" type="text" placeholder="Your name" maxlength="40" value="${esc(profile.name)}" autofocus />
+      <label for="email-input">Slack email</label>
+      <input id="email-input" type="email" placeholder="you@company.com" maxlength="100" value="${esc(profile.email)}"
+        onkeydown="if(event.key==='Enter')saveProfile()" />
+      <div id="p-err" class="error" style="margin:-6px 0 8px"></div>
+      <button onclick="saveProfile()">Continue</button>
+      ${canCancel ? '<button class="secondary" onclick="cancelProfile()">Cancel</button>' : ''}
+    </div>
+  </div>`;
+}
+
+function renderApp() {
+  if (!isConfigured()) { renderSetupScreen(); return; }
+  if (!profile.name || !profile.email || editingProfile) { renderProfileScreen(); return; }
+  document.getElementById('root').innerHTML = `<div class="container" id="main"></div><div id="modal-root"></div>`;
+  renderMain();
+  renderModal();
+}
+
+function renderMain() {
+  const main = document.getElementById('main');
+  if (!main) return;
+
+  const now = Date.now();
+  const dates = getWeekDates(weekOffset);
+  const wk = weekKey(dates);
+  const months = [...new Set(dates.map(d => MONTHS[d.getMonth()]))];
+  const weekLabel = `${months.join(' / ')} ${dates[0].getFullYear()}`;
+  const wkBookings = roomBookings(room).filter(b => b.week === wk);
+
+  let h = `<div class="header">
+    <div class="app-title">Meeting rooms</div>
+    <div class="header-right">
+      <span class="user-pill" onclick="editProfile()" title="Change name or email">&#128100; ${esc(profile.name)}</span>
+      <div class="nav">
+        <button onclick="weekOffset--;renderMain()" aria-label="Previous week">&#8592;</button>
+        <span class="week-label">${weekLabel}</span>
+        <button onclick="weekOffset++;renderMain()" aria-label="Next week">&#8594;</button>
+      </div>
+    </div>
+  </div>
+  <div class="rooms">`;
+
+  ROOMS.forEach(r => {
+    const s = roomStatus(r, now);
+    h += `<button class="room-tab${r === room ? ' active' : ''}" onclick="selectRoom('${r}')">
+      <div class="room-tab-top"><span class="status-dot${s.busy ? ' busy' : ''}"></span>Room ${r}</div>
+      <div class="room-status" title="${esc(s.text)}">${s.busy ? 'In use ‚Äî ' : ''}${esc(s.text)}</div>
+    </button>`;
+  });
+
+  h += `</div>
+  <div class="calendar">
+    <div class="cal-head"><div class="cal-head-cell"></div>`;
+
+  dates.forEach((d, i) => {
+    const tod = isToday(d) ? ' today' : '';
+    h += `<div class="cal-head-cell${tod}"><span class="dn">${d.getDate()}</span>${DAYS[i]}</div>`;
+  });
+
+  h += `</div><div class="cal-body"><div class="time-col">`;
+  TIMES.forEach(t => { h += `<div class="time-cell">${t}</div>`; });
+  h += `</div>`;
+
+  for (let d = 0; d < 5; d++) {
+    h += `<div class="day-col">`;
+    TIMES.forEach((_, si) => {
+      const booked = isSlotBooked(wkBookings, d, si);
+      h += `<div class="slot${booked ? ' booked' : ''}" ${!booked ? `onclick="openNew(${d},${si})"` : ''}></div>`;
+    });
+    wkBookings.filter(b => b.day === d).forEach(b => {
+      const c = colorFor(b.organizer);
+      const top = b.startSlot * SLOT_H;
+      const height = (b.endSlot - b.startSlot) * SLOT_H - 2;
+      const cls = (isAwaiting(b) ? ' awaiting' : '') + (b.endAt && b.endAt < now ? ' past' : '');
+      const tick = b.status === 'confirmed' ? ' ‚úì' : '';
+      const tip = `${b.title} ‚Äî booked by ${b.organizer || 'unknown'}, ${timeLabel(b.startSlot, b.endSlot)}`;
+      h += `<div class="booking${cls}" title="${esc(tip)}" style="top:${top}px;height:${height}px;background:${c.bg};border:1px solid ${c.border};color:${c.text}" onclick="openView('${b.id}')">
+        <div class="booking-title">${esc(b.title)}${tick}</div>
+        <div class="booking-meta">${esc(b.organizer || '‚Äî')} ¬∑ ${timeLabel(b.startSlot, b.endSlot)}</div>
+      </div>`;
+    });
+    if (isToday(dates[d])) {
+      const n = new Date(now);
+      const mins = n.getHours() * 60 + n.getMinutes() - 8 * 60;
+      if (mins >= 0 && mins <= TIMES.length * 30) {
+        h += `<div class="now-line" style="top:${(mins / 30) * SLOT_H}px"></div>`;
+      }
+    }
+    h += `</div>`;
   }
-);
+
+  h += `</div></div>
+  <div class="legend">
+    <span><span class="legend-dot"></span>Click any empty slot to book</span>
+    <span><span class="legend-dot dashed"></span>Awaiting confirmation in Slack</span>
+    <span>‚úì Confirmed</span>
+  </div>`;
+
+  main.innerHTML = h;
+}
+
+function renderModal() {
+  const el = document.getElementById('modal-root');
+  if (!el) return;
+  let h = '';
+
+  if (modal?.type === 'new') {
+    const startOpts = TIMES.map((t, i) => `<option value="${i}" ${i === modal.startSlot ? 'selected' : ''}>${t}</option>`).join('');
+    const endOpts = LABELS.map((t, i) => i === 0 ? '' : `<option value="${i}" ${i === modal.endSlot ? 'selected' : ''}>${t}</option>`).join('');
+    h = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+      <div class="modal">
+        <h3>Book Room ${room}</h3>
+        <div class="field"><label>Meeting title</label><input id="m-title" type="text" placeholder="e.g. Team sync" maxlength="80" autofocus
+          onkeydown="if(event.key==='Enter')confirmBooking()" /></div>
+        <div class="field" style="font-size:13px;color:var(--text-secondary)">Booking as <strong style="color:var(--text)">${esc(profile.name)}</strong></div>
+        <div class="two-col">
+          <div class="field"><label>Start</label><select id="m-start">${startOpts}</select></div>
+          <div class="field"><label>End</label><select id="m-end">${endOpts}</select></div>
+        </div>
+        <div class="hint">You'll get a Slack DM ${REMINDER_MIN} min before to confirm. Unconfirmed bookings are released shortly after they start.</div>
+        <div id="m-err" class="error"></div>
+        <div class="modal-actions">
+          <button onclick="closeModal()">Cancel</button>
+          <button class="btn-confirm" onclick="confirmBooking()">Book room</button>
+        </div>
+      </div>
+    </div>`;
+  } else if (modal?.type === 'view') {
+    const b = bookings[modal.id];
+    if (!b) {
+      modal = null;
+    } else {
+      const c = colorFor(b.organizer);
+      const own = isOwn(b);
+      const dayDate = b.startAt
+        ? new Date(b.startAt).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
+        : DAYS[b.day];
+      const status = b.status === 'confirmed'
+        ? '<span class="confirmed">Confirmed ‚úì</span>'
+        : isAwaiting(b) ? '<span class="awaiting">Awaiting confirmation</span>'
+        : `<span>Reminder ${REMINDER_MIN} min before</span>`;
+      h = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
+        <div class="modal">
+          <h3>${esc(b.title)}</h3>
+          ${own ? '<div class="own-badge">Your booking</div>' : ''}
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
+            <span style="background:${c.bg};color:${c.text};border:1px solid ${c.border};border-radius:4px;padding:3px 10px;font-size:12px;">${timeLabel(b.startSlot, b.endSlot)}</span>
+            <span style="font-size:13px;color:var(--text-secondary);">Room ${esc(b.room)} ¬∑ ${dayDate}</span>
+          </div>
+          <div class="detail">Booked by: <span>${esc(b.organizer || '‚Äî')}</span></div>
+          ${b.organizerEmail ? `<div class="detail">Contact: <span>${esc(b.organizerEmail)}</span></div>` : ''}
+          <div class="detail">Status: ${status}</div>
+          <div class="modal-actions">
+            ${own && isAwaiting(b) ? `<button class="btn-confirm" onclick="confirmFromWeb('${modal.id}')">Confirm</button>` : ''}
+            ${own ? `<button class="btn-delete" onclick="deleteBooking('${modal.id}')">Cancel booking</button>` : ''}
+            <button onclick="closeModal()">Close</button>
+          </div>
+        </div>
+      </div>`;
+    }
+  }
+
+  el.innerHTML = h;
+}
+
+// ‚îÄ‚îÄ Boot ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+Object.assign(window, {
+  openNew, openView, closeModal, confirmBooking, confirmFromWeb, deleteBooking,
+  saveProfile, editProfile, cancelProfile, selectRoom, renderMain,
+});
+
+if (isConfigured()) {
+  initFirebase();
+  renderApp();
+  setInterval(renderMain, 30000);   // keep "now" status and time line current
+} else {
+  renderSetupScreen();
+}
+</script>
+</body>
+</html>
