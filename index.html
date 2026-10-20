@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Room 204 & 202 ‚Äî Booking</title>
+  <title>Room 204 & 202 &#8212; Booking</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -151,32 +151,33 @@
     .cal-body { display: grid; grid-template-columns: 56px repeat(5, 1fr); }
     .time-col { display: flex; flex-direction: column; }
     .time-cell {
-      height: 44px; display: flex; align-items: flex-start; justify-content: flex-end;
-      padding: 4px 8px 0 0; font-size: 11px; color: var(--text-tertiary);
+      height: 22px; display: flex; align-items: flex-start; justify-content: flex-end;
+      padding: 3px 8px 0 0; font-size: 11px; color: var(--text-tertiary);
       border-bottom: 0.5px solid var(--border); border-right: 0.5px solid var(--border);
     }
+    .time-cell.qtr, .slot.qtr { border-bottom-color: transparent; }
 
     .day-col { position: relative; border-right: 0.5px solid var(--border); min-width: 0; }
     .day-col:last-child { border-right: none; }
 
     .slot {
-      height: 44px; border-bottom: 0.5px solid var(--border);
+      height: 22px; border-bottom: 0.5px solid var(--border);
       cursor: pointer; position: relative; transition: background 0.1s;
     }
     .slot:hover { background: var(--bg-secondary); }
     .slot.booked { cursor: default; }
     .slot:not(.booked):hover::after {
       content: "+"; position: absolute; right: 6px; top: 50%;
-      transform: translateY(-50%); font-size: 18px; color: var(--green); opacity: 0.6;
+      transform: translateY(-50%); font-size: 15px; color: var(--green); opacity: 0.6;
     }
 
     .booking {
       position: absolute; left: 2px; right: 2px; border-radius: 6px;
-      padding: 4px 6px; z-index: 2; overflow: hidden; cursor: pointer;
+      padding: 3px 6px; z-index: 2; overflow: hidden; cursor: pointer;
     }
-    .booking.awaiting { border-style: dashed !important; }
+    .booking.short { padding-top: 1px; padding-bottom: 1px; }
     .booking.past { opacity: 0.55; }
-    .booking-title { font-size: 11px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .booking-title { font-size: 11px; line-height: 16px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .booking-meta { font-size: 10px; opacity: 0.8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
     .now-line {
@@ -194,7 +195,6 @@
     }
     .legend span { display: inline-flex; align-items: center; gap: 6px; }
     .legend-dot { width: 10px; height: 10px; border-radius: 3px; background: var(--green-bg); border: 1px solid var(--green); }
-    .legend-dot.dashed { border-style: dashed; }
 
     /* Modal */
     .modal-bg {
@@ -236,8 +236,6 @@
     }
     .detail { font-size: 13px; color: var(--text-secondary); margin-bottom: 6px; }
     .detail span { color: var(--text); }
-    .detail .awaiting { color: var(--amber); }
-    .detail .confirmed { color: var(--green); }
     .hint { font-size: 12px; color: var(--text-tertiary); margin-top: 4px; line-height: 1.5; }
 
     @media (max-width: 520px) {
@@ -255,7 +253,7 @@
 <div id="root"></div>
 
 <script>
-// ‚îÄ‚îÄ‚îÄ Firebase config ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// \u2500\u2500\u2500 Firebase config \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 const FIREBASE_CONFIG = {
   apiKey: "AIzaSyDpKr7x9dSQV4BQ33z8y6tFQTWxIz65aBo",
   authDomain: "booking-86a47.firebaseapp.com",
@@ -265,11 +263,13 @@ const FIREBASE_CONFIG = {
   messagingSenderId: "521433950401",
   appId: "1:521433950401:web:707b500336c153aa7d0c40"
 };
-// ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 const ROOMS = ['204', '202'];
-const REMINDER_MIN = 10;   // keep in sync with functions/index.js
-const SLOT_H = 44;
+const DAY_START = 8 * 60;   // 8:00, in minutes
+const DAY_END = 18 * 60;    // 18:00
+const STEP = 15;            // minutes per slot
+const SLOT_H = 22;          // px per slot
 
 const COLORS = [
   { bg: '#E1F5EE', border: '#1D9E75', text: '#085041' },
@@ -279,13 +279,10 @@ const COLORS = [
   { bg: '#EEEDFE', border: '#7F77DD', text: '#26215C' },
 ];
 
-// Slot start times; LABELS[i] is the boundary at the start of slot i (LABELS[20] = 18:00).
-const TIMES = [
-  '8:00','8:30','9:00','9:30','10:00','10:30','11:00','11:30',
-  '12:00','12:30','13:00','13:30','14:00','14:30','15:00','15:30',
-  '16:00','16:30','17:00','17:30'
-];
-const LABELS = [...TIMES, '18:00'];
+const hm = mins => `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, '0')}`;
+// LABELS[i] is the time at the start of slot i; the last entry (18:00) is only an end time.
+const LABELS = Array.from({ length: (DAY_END - DAY_START) / STEP + 1 }, (_, i) => hm(DAY_START + i * STEP));
+const SLOTS = LABELS.length - 1;
 const DAYS = ['Mon','Tue','Wed','Thu','Fri'];
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
@@ -300,7 +297,7 @@ let editingProfile = false;
 let room = ROOMS.includes(load('rb_room')) ? load('rb_room') : ROOMS[0];
 let profile = (() => {
   try { const p = JSON.parse(load('rb_profile')); if (p) return p; } catch {}
-  return { name: load('room208_name') || '', email: '' };   // migrate old name-only profile
+  return { name: load('room208_name') || '' };   // migrate old name-only profile
 })();
 
 function isConfigured() {
@@ -317,7 +314,7 @@ function initFirebase() {
   });
 }
 
-// ‚îÄ‚îÄ Helpers ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// \u2500\u2500 Helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -355,23 +352,30 @@ function weekKey(dates) {
 }
 
 function slotTime(date, slot) {
-  const [h, m] = LABELS[slot].split(':').map(Number);
   const d = new Date(date);
-  d.setHours(h, m, 0, 0);
+  d.setHours(0, DAY_START + slot * STEP, 0, 0);
   return d.getTime();
 }
 
+function minsOfDay(ms) { const d = new Date(ms); return d.getHours() * 60 + d.getMinutes(); }
 function fmt(ms) { return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
-function timeLabel(s, e) { return `${LABELS[s]} ‚Äì ${LABELS[e]}`; }
+function timeRange(b) { return `${hm(minsOfDay(b.startAt))} \u2013 ${hm(minsOfDay(b.endAt))}`; }
 
 function roomBookings(r) {
   return Object.entries(bookings)
-    .filter(([, b]) => b.room === r)
+    .filter(([, b]) => b.room === r && b.startAt && b.endAt)
     .map(([id, b]) => ({ ...b, id }));
 }
 
-function isSlotBooked(list, day, slot) {
-  return list.some(b => b.day === day && slot >= b.startSlot && slot < b.endSlot);
+// Bookings in the shown week, tagged with the weekday column they fall in.
+function weekBookings(r, dates) {
+  return roomBookings(r)
+    .map(b => ({ ...b, col: dates.findIndex(d => sameDay(d, b.startAt)) }))
+    .filter(b => b.col >= 0);
+}
+
+function overlaps(r, startAt, endAt) {
+  return roomBookings(r).some(b => startAt < b.endAt && endAt > b.startAt);
 }
 
 function isOwn(b) {
@@ -379,20 +383,18 @@ function isOwn(b) {
   return !!b.organizer && b.organizer.toLowerCase() === profile.name.toLowerCase();
 }
 
-function isAwaiting(b) { return b.status === 'pending' && !!b.reminderSentAt; }
-
 // Who has the room right now, or when it's next taken today.
 function roomStatus(r, now) {
   const upcoming = roomBookings(r)
-    .filter(b => b.startAt && b.endAt > now)
+    .filter(b => b.endAt > now)
     .sort((a, b) => a.startAt - b.startAt);
   const cur = upcoming.find(b => b.startAt <= now);
-  if (cur) return { busy: true, text: `${cur.organizer || 'Someone'} ¬∑ ${cur.title} ¬∑ until ${fmt(cur.endAt)}` };
+  if (cur) return { busy: true, text: `${cur.organizer || 'Someone'} \u00b7 ${cur.title} \u00b7 until ${fmt(cur.endAt)}` };
   const next = upcoming.find(b => sameDay(b.startAt, now));
   return { busy: false, text: next ? `Free until ${fmt(next.startAt)} (${next.organizer || 'booked'})` : 'Free for the rest of the day' };
 }
 
-// ‚îÄ‚îÄ Actions ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// \u2500\u2500 Actions \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 function selectRoom(r) {
   room = r;
@@ -401,7 +403,7 @@ function selectRoom(r) {
 }
 
 function openNew(day, slot) {
-  modal = { type: 'new', day, startSlot: slot, endSlot: Math.min(slot + 2, TIMES.length) };
+  modal = { type: 'new', day, startSlot: slot, endSlot: Math.min(slot + 2, SLOTS) };
   renderModal();
 }
 
@@ -423,34 +425,19 @@ function confirmBooking() {
   if (endSlot <= startSlot) { errEl.textContent = 'End time must be after start time.'; return; }
 
   const dates = getWeekDates(weekOffset);
-  const wk = weekKey(dates);
   const startAt = slotTime(dates[modal.day], startSlot);
   const endAt = slotTime(dates[modal.day], endSlot);
-  const now = Date.now();
 
-  if (endAt <= now) { errEl.textContent = 'That time has already passed.'; return; }
-
-  const conflict = Object.values(bookings).some(b =>
-    b.room === room && b.week === wk && b.day === modal.day &&
-    startSlot < b.endSlot && endSlot > b.startSlot
-  );
-  if (conflict) { errEl.textContent = 'That time overlaps an existing booking.'; return; }
+  if (endAt <= Date.now()) { errEl.textContent = 'That time has already passed.'; return; }
+  if (overlaps(room, startAt, endAt)) { errEl.textContent = 'That time overlaps an existing booking.'; return; }
 
   db.ref('bookings').push({
-    room, week: wk, day: modal.day, startSlot, endSlot, startAt, endAt, title,
+    room, week: weekKey(dates), day: modal.day, startSlot, endSlot, startAt, endAt, title,
     organizer: profile.name,
-    organizerEmail: profile.email,
-    // Bookings starting within the reminder window are confirmed by the act of booking.
-    status: startAt - now <= REMINDER_MIN * 60000 ? 'confirmed' : 'pending',
+    ...(profile.email ? { organizerEmail: profile.email } : {}),
     createdAt: firebase.database.ServerValue.TIMESTAMP,
   }).catch(e => alert('Could not save booking: ' + e.message));
   closeModal();
-}
-
-function confirmFromWeb(id) {
-  db.ref('bookings/' + id).transaction(cur =>
-    cur ? { ...cur, status: 'confirmed', confirmedAt: Date.now() } : cur
-  );
 }
 
 function deleteBooking(id) {
@@ -460,11 +447,9 @@ function deleteBooking(id) {
 
 function saveProfile() {
   const name = document.getElementById('name-input').value.trim();
-  const email = document.getElementById('email-input').value.trim().toLowerCase();
   const errEl = document.getElementById('p-err');
   if (!name) { errEl.textContent = 'Please enter your name.'; return; }
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) { errEl.textContent = 'Enter the email you use for Slack.'; return; }
-  profile = { name, email };
+  profile = { ...profile, name };
   store('rb_profile', JSON.stringify(profile));
   store('room208_name', null);
   editingProfile = false;
@@ -474,7 +459,7 @@ function saveProfile() {
 function editProfile() { editingProfile = true; renderApp(); }
 function cancelProfile() { editingProfile = false; renderApp(); }
 
-// ‚îÄ‚îÄ Screens ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// \u2500\u2500 Screens \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 function renderSetupScreen() {
   document.getElementById('root').innerHTML = `
@@ -483,23 +468,21 @@ function renderSetupScreen() {
       <h2>Connect Firebase</h2>
       <p>This app needs a free Firebase Realtime Database so everyone sees live bookings.</p>
       <p class="setup-step"><strong>1.</strong> Create a project at <a href="https://console.firebase.google.com" target="_blank" style="color:var(--green)">console.firebase.google.com</a>.</p>
-      <p class="setup-step"><strong>2.</strong> Build ‚Üí Realtime Database ‚Üí Create database.</p>
-      <p class="setup-step"><strong>3.</strong> Project Settings ‚Üí Your apps ‚Üí Web ‚Üí copy the config into <code>FIREBASE_CONFIG</code> in index.html.</p>
+      <p class="setup-step"><strong>2.</strong> Build \u2192 Realtime Database \u2192 Create database.</p>
+      <p class="setup-step"><strong>3.</strong> Project Settings \u2192 Your apps \u2192 Web \u2192 copy the config into <code>FIREBASE_CONFIG</code> in index.html.</p>
     </div>
   </div>`;
 }
 
 function renderProfileScreen() {
-  const canCancel = editingProfile && profile.name && profile.email;
+  const canCancel = editingProfile && profile.name;
   document.getElementById('root').innerHTML = `
   <div class="name-screen">
     <div class="name-card">
       <h2>Welcome to room booking</h2>
-      <p>Your name shows on your bookings. Your Slack email is used to send you a reminder ${REMINDER_MIN} minutes before each meeting so you can confirm it.</p>
+      <p>Enter your name so others can see who has booked the room. You'll only need to do this once.</p>
       <label for="name-input">Name</label>
-      <input id="name-input" type="text" placeholder="Your name" maxlength="40" value="${esc(profile.name)}" autofocus />
-      <label for="email-input">Slack email</label>
-      <input id="email-input" type="email" placeholder="you@company.com" maxlength="100" value="${esc(profile.email)}"
+      <input id="name-input" type="text" placeholder="Your name" maxlength="40" value="${esc(profile.name)}" autofocus
         onkeydown="if(event.key==='Enter')saveProfile()" />
       <div id="p-err" class="error" style="margin:-6px 0 8px"></div>
       <button onclick="saveProfile()">Continue</button>
@@ -510,7 +493,7 @@ function renderProfileScreen() {
 
 function renderApp() {
   if (!isConfigured()) { renderSetupScreen(); return; }
-  if (!profile.name || !profile.email || editingProfile) { renderProfileScreen(); return; }
+  if (!profile.name || editingProfile) { renderProfileScreen(); return; }
   document.getElementById('root').innerHTML = `<div class="container" id="main"></div><div id="modal-root"></div>`;
   renderMain();
   renderModal();
@@ -522,15 +505,14 @@ function renderMain() {
 
   const now = Date.now();
   const dates = getWeekDates(weekOffset);
-  const wk = weekKey(dates);
   const months = [...new Set(dates.map(d => MONTHS[d.getMonth()]))];
   const weekLabel = `${months.join(' / ')} ${dates[0].getFullYear()}`;
-  const wkBookings = roomBookings(room).filter(b => b.week === wk);
+  const wkBookings = weekBookings(room, dates);
 
   let h = `<div class="header">
     <div class="app-title">Meeting rooms</div>
     <div class="header-right">
-      <span class="user-pill" onclick="editProfile()" title="Change name or email">&#128100; ${esc(profile.name)}</span>
+      <span class="user-pill" onclick="editProfile()" title="Change name">&#128100; ${esc(profile.name)}</span>
       <div class="nav">
         <button onclick="weekOffset--;renderMain()" aria-label="Previous week">&#8592;</button>
         <span class="week-label">${weekLabel}</span>
@@ -544,7 +526,7 @@ function renderMain() {
     const s = roomStatus(r, now);
     h += `<button class="room-tab${r === room ? ' active' : ''}" onclick="selectRoom('${r}')">
       <div class="room-tab-top"><span class="status-dot${s.busy ? ' busy' : ''}"></span>Room ${r}</div>
-      <div class="room-status" title="${esc(s.text)}">${s.busy ? 'In use ‚Äî ' : ''}${esc(s.text)}</div>
+      <div class="room-status" title="${esc(s.text)}">${s.busy ? 'In use \u2014 ' : ''}${esc(s.text)}</div>
     </button>`;
   });
 
@@ -557,33 +539,38 @@ function renderMain() {
     h += `<div class="cal-head-cell${tod}"><span class="dn">${d.getDate()}</span>${DAYS[i]}</div>`;
   });
 
+  // Label each half hour; the :15/:45 rows get a hidden divider so the grid reads in half hours.
+  const qtr = si => (si % 2 === 0 ? ' qtr' : '');
   h += `</div><div class="cal-body"><div class="time-col">`;
-  TIMES.forEach(t => { h += `<div class="time-cell">${t}</div>`; });
+  for (let si = 0; si < SLOTS; si++) h += `<div class="time-cell${qtr(si)}">${si % 2 === 0 ? LABELS[si] : ''}</div>`;
   h += `</div>`;
 
   for (let d = 0; d < 5; d++) {
     h += `<div class="day-col">`;
-    TIMES.forEach((_, si) => {
-      const booked = isSlotBooked(wkBookings, d, si);
-      h += `<div class="slot${booked ? ' booked' : ''}" ${!booked ? `onclick="openNew(${d},${si})"` : ''}></div>`;
-    });
-    wkBookings.filter(b => b.day === d).forEach(b => {
+    const dayBookings = wkBookings.filter(b => b.col === d);
+    for (let si = 0; si < SLOTS; si++) {
+      const s0 = slotTime(dates[d], si), s1 = slotTime(dates[d], si + 1);
+      const booked = dayBookings.some(b => b.startAt < s1 && b.endAt > s0);
+      h += `<div class="slot${qtr(si)}${booked ? ' booked' : ''}" ${!booked ? `onclick="openNew(${d},${si})"` : ''}></div>`;
+    }
+    dayBookings.forEach(b => {
       const c = colorFor(b.organizer);
-      const top = b.startSlot * SLOT_H;
-      const height = (b.endSlot - b.startSlot) * SLOT_H - 2;
-      const cls = (isAwaiting(b) ? ' awaiting' : '') + (b.endAt && b.endAt < now ? ' past' : '');
-      const tick = b.status === 'confirmed' ? ' ‚úì' : '';
-      const tip = `${b.title} ‚Äî booked by ${b.organizer || 'unknown'}, ${timeLabel(b.startSlot, b.endSlot)}`;
-      h += `<div class="booking${cls}" title="${esc(tip)}" style="top:${top}px;height:${height}px;background:${c.bg};border:1px solid ${c.border};color:${c.text}" onclick="openView('${b.id}')">
-        <div class="booking-title">${esc(b.title)}${tick}</div>
-        <div class="booking-meta">${esc(b.organizer || '‚Äî')} ¬∑ ${timeLabel(b.startSlot, b.endSlot)}</div>
+      const startS = Math.max(0, (minsOfDay(b.startAt) - DAY_START) / STEP);
+      const endS = Math.min(SLOTS, (minsOfDay(b.endAt) - DAY_START) / STEP);
+      if (endS <= startS) return;
+      const height = (endS - startS) * SLOT_H - 2;
+      const short = endS - startS <= 1;   // 15 min: one line only
+      const cls = (short ? ' short' : '') + (b.endAt < now ? ' past' : '');
+      const tip = `${b.title} \u2014 booked by ${b.organizer || 'unknown'}, ${timeRange(b)}`;
+      h += `<div class="booking${cls}" title="${esc(tip)}" style="top:${startS * SLOT_H}px;height:${height}px;background:${c.bg};border:1px solid ${c.border};color:${c.text}" onclick="openView('${b.id}')">
+        <div class="booking-title">${esc(b.title)}${short ? ` \u00b7 ${esc(b.organizer || '')}` : ''}</div>
+        ${short ? '' : `<div class="booking-meta">${esc(b.organizer || '\u2014')} \u00b7 ${timeRange(b)}</div>`}
       </div>`;
     });
     if (isToday(dates[d])) {
-      const n = new Date(now);
-      const mins = n.getHours() * 60 + n.getMinutes() - 8 * 60;
-      if (mins >= 0 && mins <= TIMES.length * 30) {
-        h += `<div class="now-line" style="top:${(mins / 30) * SLOT_H}px"></div>`;
+      const mins = minsOfDay(now) - DAY_START;
+      if (mins >= 0 && mins <= DAY_END - DAY_START) {
+        h += `<div class="now-line" style="top:${(mins / STEP) * SLOT_H}px"></div>`;
       }
     }
     h += `</div>`;
@@ -592,8 +579,6 @@ function renderMain() {
   h += `</div></div>
   <div class="legend">
     <span><span class="legend-dot"></span>Click any empty slot to book</span>
-    <span><span class="legend-dot dashed"></span>Awaiting confirmation in Slack</span>
-    <span>‚úì Confirmed</span>
   </div>`;
 
   main.innerHTML = h;
@@ -605,7 +590,7 @@ function renderModal() {
   let h = '';
 
   if (modal?.type === 'new') {
-    const startOpts = TIMES.map((t, i) => `<option value="${i}" ${i === modal.startSlot ? 'selected' : ''}>${t}</option>`).join('');
+    const startOpts = LABELS.slice(0, SLOTS).map((t, i) => `<option value="${i}" ${i === modal.startSlot ? 'selected' : ''}>${t}</option>`).join('');
     const endOpts = LABELS.map((t, i) => i === 0 ? '' : `<option value="${i}" ${i === modal.endSlot ? 'selected' : ''}>${t}</option>`).join('');
     h = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
       <div class="modal">
@@ -617,7 +602,6 @@ function renderModal() {
           <div class="field"><label>Start</label><select id="m-start">${startOpts}</select></div>
           <div class="field"><label>End</label><select id="m-end">${endOpts}</select></div>
         </div>
-        <div class="hint">You'll get a Slack DM ${REMINDER_MIN} min before to confirm. Unconfirmed bookings are released shortly after they start.</div>
         <div id="m-err" class="error"></div>
         <div class="modal-actions">
           <button onclick="closeModal()">Cancel</button>
@@ -632,26 +616,17 @@ function renderModal() {
     } else {
       const c = colorFor(b.organizer);
       const own = isOwn(b);
-      const dayDate = b.startAt
-        ? new Date(b.startAt).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' })
-        : DAYS[b.day];
-      const status = b.status === 'confirmed'
-        ? '<span class="confirmed">Confirmed ‚úì</span>'
-        : isAwaiting(b) ? '<span class="awaiting">Awaiting confirmation</span>'
-        : `<span>Reminder ${REMINDER_MIN} min before</span>`;
+      const dayDate = new Date(b.startAt).toLocaleDateString([], { weekday: 'short', month: 'short', day: 'numeric' });
       h = `<div class="modal-bg" onclick="if(event.target===this)closeModal()">
         <div class="modal">
           <h3>${esc(b.title)}</h3>
           ${own ? '<div class="own-badge">Your booking</div>' : ''}
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
-            <span style="background:${c.bg};color:${c.text};border:1px solid ${c.border};border-radius:4px;padding:3px 10px;font-size:12px;">${timeLabel(b.startSlot, b.endSlot)}</span>
-            <span style="font-size:13px;color:var(--text-secondary);">Room ${esc(b.room)} ¬∑ ${dayDate}</span>
+            <span style="background:${c.bg};color:${c.text};border:1px solid ${c.border};border-radius:4px;padding:3px 10px;font-size:12px;">${timeRange(b)}</span>
+            <span style="font-size:13px;color:var(--text-secondary);">Room ${esc(b.room)} \u00b7 ${dayDate}</span>
           </div>
-          <div class="detail">Booked by: <span>${esc(b.organizer || '‚Äî')}</span></div>
-          ${b.organizerEmail ? `<div class="detail">Contact: <span>${esc(b.organizerEmail)}</span></div>` : ''}
-          <div class="detail">Status: ${status}</div>
+          <div class="detail">Booked by: <span>${esc(b.organizer || '\u2014')}</span></div>
           <div class="modal-actions">
-            ${own && isAwaiting(b) ? `<button class="btn-confirm" onclick="confirmFromWeb('${modal.id}')">Confirm</button>` : ''}
             ${own ? `<button class="btn-delete" onclick="deleteBooking('${modal.id}')">Cancel booking</button>` : ''}
             <button onclick="closeModal()">Close</button>
           </div>
@@ -663,9 +638,9 @@ function renderModal() {
   el.innerHTML = h;
 }
 
-// ‚îÄ‚îÄ Boot ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// \u2500\u2500 Boot \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 Object.assign(window, {
-  openNew, openView, closeModal, confirmBooking, confirmFromWeb, deleteBooking,
+  openNew, openView, closeModal, confirmBooking, deleteBooking,
   saveProfile, editProfile, cancelProfile, selectRoom, renderMain,
 });
 
